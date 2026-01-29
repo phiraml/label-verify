@@ -133,8 +133,72 @@ export default function BatchPage() {
     setProgress({ completed: 0, total: itemCount });
     setCounts({ approved: 0, needsReview: 0, rejected: 0, errors: 0 });
 
+    abortRef.current = new AbortController();
+    const signal = abortRef.current.signal;
+
+    const CONCURRENCY = 5;
+    let completed = 0;
+    let approved = 0;
+    let needsReview = 0;
+    let rejected = 0;
+    let errorCount = 0;
+
+    type BatchItem = { id: string; image: string; application_id: string };
+
+    const processItem = async (item: BatchItem) => {
+      const itemStart = Date.now();
+      try {
+        const res = await fetch("/api/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            image: item.image,
+            application_id: item.application_id,
+          }),
+          signal,
+        });
+
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data.error || "Verification failed");
+        }
+
+        const data = await res.json();
+        const batchResult: BatchResultItem = {
+          id: item.id,
+          status: data.result.overall_status,
+          processing_time_ms: data.processing_time_ms,
+          critical_issues: data.result.critical_issues,
+          warnings: data.result.warnings,
+          result: data.result,
+          image_quality: data.image_quality,
+        };
+
+        if (batchResult.status === "APPROVED") approved++;
+        else if (batchResult.status === "NEEDS_REVIEW") needsReview++;
+        else rejected++;
+
+        setResults((prev) => [...prev, batchResult]);
+      } catch (err) {
+        if (signal.aborted) return;
+        errorCount++;
+        const batchResult: BatchResultItem = {
+          id: item.id,
+          status: "REJECTED",
+          processing_time_ms: Date.now() - itemStart,
+          critical_issues: [],
+          warnings: [],
+          error: err instanceof Error ? err.message : "Processing failed",
+        };
+        setResults((prev) => [...prev, batchResult]);
+      } finally {
+        completed++;
+        setProgress({ completed, total: itemCount });
+      }
+    };
+
     try {
-      let items;
+      let items: BatchItem[];
 
       if (isBundled) {
         items = await Promise.all(
@@ -143,11 +207,7 @@ export default function BatchPage() {
               throw new Error(`Application ${app.id} has no bundled image`);
             }
             const base64 = await fetchImageAsBase64(app.label_image_url);
-            return {
-              id: app.id,
-              image: base64,
-              application_id: app.id,
-            };
+            return { id: app.id, image: base64, application_id: app.id };
           })
         );
       } else {
@@ -155,73 +215,25 @@ export default function BatchPage() {
         items = await Promise.all(
           files.map(async (file, i) => {
             const base64 = await fileToBase64(file);
-            return {
-              id: file.name,
-              image: base64,
-              application_id: demoIds[i % demoIds.length],
-            };
+            return { id: file.name, image: base64, application_id: demoIds[i % demoIds.length] };
           })
         );
       }
 
-      abortRef.current = new AbortController();
-
-      const res = await fetch("/api/batch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items }),
-        signal: abortRef.current.signal,
+      const queue = [...items];
+      const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
+        while (queue.length > 0 && !signal.aborted) {
+          const item = queue.shift();
+          if (item) await processItem(item);
+        }
       });
 
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || "Batch processing failed");
-      }
+      await Promise.all(workers);
 
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error("No response body");
-
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        let eventType = "";
-        for (const line of lines) {
-          if (line.startsWith("event: ")) {
-            eventType = line.slice(7).trim();
-          } else if (line.startsWith("data: ")) {
-            const data = JSON.parse(line.slice(6));
-
-            if (eventType === "result") {
-              setResults((prev) => [...prev, data as BatchResultItem]);
-            } else if (eventType === "progress") {
-              setProgress({
-                completed: data.completed,
-                total: data.total,
-              });
-            } else if (eventType === "complete") {
-              setCounts({
-                approved: data.approved,
-                needsReview: data.needs_review,
-                rejected: data.rejected,
-                errors: data.errors,
-              });
-            }
-          }
-        }
-      }
+      setCounts({ approved, needsReview, rejected, errors: errorCount });
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
-      setError(
-        err instanceof Error ? err.message : "Batch processing failed"
-      );
+      setError(err instanceof Error ? err.message : "Batch processing failed");
     } finally {
       setProcessing(false);
       abortRef.current = null;
