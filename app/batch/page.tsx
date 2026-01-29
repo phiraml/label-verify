@@ -159,8 +159,15 @@ export default function BatchPage() {
         });
 
         if (!res.ok) {
-          const data = await res.json();
-          throw new Error(data.error || "Verification failed");
+          let message = "Verification failed";
+          try {
+            const data = await res.json();
+            message = data.error || message;
+          } catch {
+            const text = await res.text();
+            message = text.slice(0, 200) || message;
+          }
+          throw new Error(message);
         }
 
         const data = await res.json();

@@ -34,7 +34,7 @@ const MOCK_APPLICATIONS: Record<string, ApplicationData> = {
     producer_name: "Sunset Valley Vineyards",
     producer_address: "456 Wine Road, Napa, CA 94558",
     country_of_origin: "USA",
-    label_image_url: "/test-labels/COL-2024-78434.png",
+    label_image_url: "/test-labels/COL-2024-78434.jpg",
   },
 
   "COL-2024-78438": {
